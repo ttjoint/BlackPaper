@@ -2,23 +2,29 @@ using System;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 namespace BlackPaper
 {
     /// <summary>
-    /// 主窗体。
-    /// 它本身不再承担遮罩职责（原来的做法就是一个最大化窗体，盖不住开始菜单），
-    /// 而是一个不可见的「控制器」：持有托盘图标 + 菜单，并驱动 OverlayManager。
+    /// 主窗体。本身不承担遮罩职责，只是一个不可见的「控制器」：
+    /// 持有托盘图标 + 菜单，驱动 OverlayManager，并管理设置窗口。
     /// </summary>
     public partial class BlackForm : Form
     {
         private AppConfig _config;
         private WindowController _wc;
         private OverlayManager _overlay;
+        private SettingsForm _settings;
+        private BrightnessSliderHost _menuSlider;
 
-        /// <summary>抑制下拉框回写，避免在加载/刷新 UI 时把精确亮度吸附成档位值。</summary>
-        private bool _suppressComboEvent;
+        /// <summary>一次滚轮的亮度步进（百分点）。</summary>
+        private const int WheelStep = 4;
+
+        /// <summary>滚轮渐变时长。较短，保证连续滚动跟手。</summary>
+        private const int WheelFadeMs = 180;
+
+        /// <summary>上一次自动模式算出的目标亮度，用于判断是否需要触发过渡。</summary>
+        private double _lastAutoTarget = -1;
 
         public BlackForm()
         {
@@ -34,7 +40,7 @@ namespace BlackPaper
             ConfigManager cm = new ConfigManager();
             _config = cm.LoadConfig();
 
-            // 控制器窗体自身保持隐藏，只负责接收广播消息（显示变更 / 会话解锁）
+            // 控制器窗体自身保持隐藏，只负责接收广播消息
             Hide();
 
             _wc = new WindowController(this);
@@ -43,32 +49,136 @@ namespace BlackPaper
             _overlay = new OverlayManager(mode);
             _overlay.SetEnabled(_config.IsEnabled);
 
-            // 以注册表的真实状态为准，纠正配置里的缓存值
+            // 以注册表的真实状态为准
             _config.IsAutoRun = _wc.checkIfAutoRun(_config.AppSubkey, _config.AppName);
 
             if (_config.IsAutoChange)
             {
-                setLightLevel(-1);
+                // 启动也走渐变：从「无遮罩」（全亮）渐入到目标亮度。
+                // 初始时 Overlay 处于 0 遮罩，所以直接 smooth 即可。
+                applyAutoBrightness(smooth: _config.SmoothTransition);
             }
             else
             {
-                setLightLevel(_config.BeginLight);
+                double mask = ToMask(_config.BeginLight);
+
+                if (_config.SmoothTransition && mask > 0.001)
+                {
+                    _overlay.SetOpacitySmooth(mask, Math.Max(400, _config.TransitionMs));
+                }
+                else
+                {
+                    _overlay.SetOpacity(mask);
+                }
             }
 
             开机自动启动ToolStripMenuItem.Checked = _config.IsAutoRun;
-
-            LoadTrayIcon();
-
-            // 菜单里只能放一个 Checked，根据当前模式勾选
+            启用屏幕压暗ToolStripMenuItem.Checked = _config.IsEnabled;
             自动调整亮度ToolStripMenuItem.Checked = _config.IsAutoChange;
             使用整屏压暗ToolStripMenuItem.Checked = _overlay.Mode == OverlayMode.Dim;
+            平滑过渡ToolStripMenuItem.Checked = _config.SmoothTransition;
 
-            RefreshStateText();
+            LoadTrayIcon();
+            BuildMenuSlider();
+
+            RefreshTrayUi();
+        }
+
+        #region 亮度 / 遮罩换算
+
+        /// <summary>
+        /// 亮度 → 遮罩强度。
+        /// 亮度 1.0（最亮）= 遮罩 0.0；亮度 0.0（最暗）= 遮罩 1.0。
+        /// </summary>
+        private static double ToMask(double brightness)
+            => 1.0 - Math.Max(0, Math.Min(1, brightness));
+
+        /// <summary>遮罩强度 → 亮度（ToMask 的逆运算）。</summary>
+        private static double ToBrightness(double mask)
+            => 1.0 - Math.Max(0, Math.Min(1, mask));
+
+        /// <summary>当前画面的亮度（0~1，1 = 最亮）。</summary>
+        private double CurrentBrightness
+            => ToBrightness(_overlay?.Opacity ?? 0);
+
+        #endregion
+
+        /// <summary>
+        /// 把亮度滑块插入右键菜单，位置在状态行下方。
+        /// </summary>
+        private void BuildMenuSlider()
+        {
+            _menuSlider = new BrightnessSliderHost
+            {
+                Name = "menuBrightnessSlider",
+            };
+
+            _menuSlider.ValueChanged += (s, e) =>
+            {
+                if (_overlay == null)
+                {
+                    return;
+                }
+
+                double brightness = _menuSlider.Value / 100.0;
+                setBrightnessManual(brightness);
+            };
+
+            // 滑块上的滚轮交给宿主统一处理（与菜单空白处同一套逻辑）
+            _menuSlider.WheelReceived += (s, e) => OnMenuMouseWheel(s, e);
+
+            // 插到状态行后面
+            int index = contextMenuStrip1.Items.IndexOf(ToolStripMenuItem_state);
+            contextMenuStrip1.Items.Insert(index + 1, _menuSlider);
+
+            // 菜单展开时把当前亮度同步到滑块
+            contextMenuStrip1.Opening += (s, e) => SyncMenuSlider();
+
+            // 在菜单空白处滚动滚轮也能调亮度（不必精准对准滑块）
+            contextMenuStrip1.MouseWheel += OnMenuMouseWheel;
+
+            SyncMenuSlider();
         }
 
         /// <summary>
-        /// 托盘图标优先从内嵌资源加载，避免路径拼接 + 文件缺失导致启动崩溃。
+        /// 菜单内滚轮调亮度。
+        ///
+        /// 要点：基于 Target（意图值）累加，而不是当前实际亮度。
+        /// 这样快速交错滚动时，每一次滚轮都在上一次的意图上叠加，
+        /// 不会因为渐变还没跑完而丢失指令。
         /// </summary>
+        private void OnMenuMouseWheel(object sender, MouseEventArgs e)
+        {
+            if (_overlay == null || !_config.IsEnabled)
+            {
+                return;
+            }
+
+            int delta = e.Delta > 0 ? WheelStep : -WheelStep;
+            int basePercent = (int)Math.Round(ToBrightness(_overlay.Target) * 100);
+            int next = Math.Max(0, Math.Min(100, basePercent + delta));
+
+            if (next == basePercent)
+            {
+                return;
+            }
+
+            setBrightnessManual(next / 100.0, smooth: true, durationMs: WheelFadeMs);
+        }
+
+        private void SyncMenuSlider()
+        {
+            if (_menuSlider == null || _overlay == null)
+            {
+                return;
+            }
+
+            // 与 RefreshTrayUi 保持一致：显示意图值，不显示渐变途中的值
+            double shown = _config.IsAutoChange ? CurrentBrightness : ToBrightness(_overlay.Target);
+            _menuSlider.Value = (int)Math.Round(Math.Max(0, Math.Min(1, shown)) * 100);
+        }
+
+        /// <summary>托盘图标优先从磁盘加载，失败则回退到窗体图标。</summary>
         private void LoadTrayIcon()
         {
             try
@@ -83,7 +193,7 @@ namespace BlackPaper
                     notifyIcon2.Icon = Icon;
                 }
 
-                notifyIcon2.Text = "BlackPaper — 屏幕遮罩";
+                notifyIcon2.Text = "BlackPaper — 屏幕压暗";
             }
             catch
             {
@@ -91,122 +201,146 @@ namespace BlackPaper
             }
         }
 
-        private void 开机自动启动ToolStripMenuItem_Click(object sender, EventArgs e)
-        {
-            if (_config.IsAutoRun)
-            {
-                _wc.AutoRun(_config.AppSubkey, _config.AppName, false);
-                _config.IsAutoRun = false;
-            }
-            else
-            {
-                _wc.AutoRun(_config.AppSubkey, _config.AppName, true);
-                _config.IsAutoRun = true;
-            }
-
-            开机自动启动ToolStripMenuItem.Checked = _config.IsAutoRun;
-            PersistConfig();
-        }
+        #region 亮度与自动模式
 
         /// <summary>
-        /// 设置亮度。level >= 0 为手动档位（0~1），level < 0 表示按时段自动调整。
+        /// 应用自动亮度。smooth 为 true 时带渐变过渡。
         /// </summary>
-        private void setLightLevel(double level)
+        private void applyAutoBrightness(bool smooth)
         {
-            if (level >= 0)
+            double hour = DateTime.Now.Hour + DateTime.Now.Minute / 60.0;
+            double target = _config.GetLightForHour(hour);
+
+            bool changed = Math.Abs(target - _lastAutoTarget) > 0.001;
+            _lastAutoTarget = target;
+
+            double mask = ToMask(target);
+
+            if (smooth && changed && _config.SmoothTransition)
             {
-                _config.IsAutoChange = false;
-                _config.BeginLight = level;
+                _overlay?.SetOpacitySmooth(mask, _config.TransitionMs);
             }
             else
             {
-                int nowHour = DateTime.Now.Hour;
-
-                if (nowHour >= 8 && nowHour <= 18)
-                {
-                    level = 0.0;      // 白天透明
-                }
-                else if (nowHour > 18 && nowHour <= 22)
-                {
-                    level = 0.2;      // 傍晚
-                }
-                else
-                {
-                    level = 0.45;     // 夜间
-                }
-
-                _config.IsAutoChange = true;
-                _config.BeginLight = level;
+                _overlay?.SetOpacity(mask);
             }
 
-            _overlay?.SetOpacity(level);
+            RefreshTrayUi();
+            SyncSettingsBrightness();
+        }
 
-            RefreshStateText();
+        /// <summary>手动设置亮度（用户拖滑块 / 滚轮）。brightness 1.0 = 最亮。</summary>
+        private void setBrightnessManual(double brightness, bool smooth = false, int durationMs = 0)
+        {
+            brightness = Math.Max(0, Math.Min(1, brightness));
+
+            _config.IsAutoChange = false;
+            _config.BeginLight = brightness;
+            _lastAutoTarget = -1;
+
+            double mask = ToMask(brightness);
+            int ms = durationMs > 0 ? durationMs : _config.TransitionMs;
+
+            if (smooth && ms > 0 && _config.SmoothTransition)
+            {
+                _overlay?.SetOpacitySmooth(mask, ms);
+            }
+            else
+            {
+                _overlay?.SetOpacity(mask);
+            }
+
+            RefreshTrayUi();
+            SyncSettingsBrightness();
+        }
+
+        private void SyncSettingsBrightness()
+        {
+            if (_settings != null && !_settings.IsDisposed && _settings.Visible)
+            {
+                // 与菜单滑块一致：显示意图值，不显示渐变途中的值
+                double shown = _config.IsAutoChange
+                    ? CurrentBrightness
+                    : ToBrightness(_overlay?.Target ?? 0);
+
+                _settings.SyncBrightness(Math.Max(0, Math.Min(1, shown)));
+            }
+        }
+
+        /// <summary>刷新托盘菜单里的状态文字与勾选。</summary>
+        private void RefreshTrayUi()
+        {
+            // 滑块显示的是「意图值」Target，不是当前实际亮度 Opacity。
+            // 这样拖动/滚轮时滑块立刻到位，而画面亮度由渐变线程慢慢追赶。
+            // 若在这里用 Opacity，滑块就会跟着渐变爬行、反向时还会回折。
+            double shown = _config.IsAutoChange ? CurrentBrightness : ToBrightness(_overlay?.Target ?? 0);
+            int percent = (int)Math.Round(Math.Max(0, Math.Min(1, shown)) * 100);
+
+            string state = _config.IsAutoChange
+                ? $"当前亮度：{percent}%（自动）"
+                : $"当前亮度：{percent}%（手动）";
+
+            ToolStripMenuItem_state.Text = state;
+
+            if (_menuSlider != null)
+            {
+                _menuSlider.Value = percent;
+            }
+
+            notifyIcon2.Text = _config.IsEnabled
+                ? $"BlackPaper — 亮度 {percent}%"
+                : "BlackPaper — 已关闭";
+
+            启用屏幕压暗ToolStripMenuItem.Checked = _config.IsEnabled;
             自动调整亮度ToolStripMenuItem.Checked = _config.IsAutoChange;
+            平滑过渡ToolStripMenuItem.Checked = _config.SmoothTransition;
         }
 
-        /// <summary>
-        /// 更新菜单里的"当前亮度"文字与下拉框选中项。
-        /// 注意：设置 SelectedIndex 会触发 SelectedIndexChanged，进而回写亮度并把
-        /// 配置文件里的精确值吸附到最近的 UI 档位。用 _suppressComboEvent 抑制这个回环。
-        /// </summary>
-        private void RefreshStateText()
+        #endregion
+
+        #region 托盘菜单
+
+        private void 启用屏幕压暗ToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            double level = _overlay?.Opacity ?? 0.0;
-            ToolStripMenuItem_state.Text = $"当前亮度：{level * 100:F0}%";
+            _config.IsEnabled = !_config.IsEnabled;
+            _overlay?.SetEnabled(_config.IsEnabled);
 
-            int index = (int)Math.Round(level * 5.0);
-            index = Math.Max(0, Math.Min(toolStripComboBox1.Items.Count - 1, index));
-
-            if (toolStripComboBox1.SelectedIndex != index)
-            {
-                _suppressComboEvent = true;
-                try
-                {
-                    toolStripComboBox1.SelectedIndex = index;
-                }
-                finally
-                {
-                    _suppressComboEvent = false;
-                }
-            }
-        }
-
-        private void 退出ToolStripMenuItem_Click(object sender, EventArgs e)
-        {
+            RefreshTrayUi();
             PersistConfig();
-
-            // 先收拾托盘图标，否则 Win11 上会留下"幽灵图标"
-            notifyIcon2.Visible = false;
-            notifyIcon2.Dispose();
-
-            _overlay?.Dispose();
-            _overlay = null;
-
-            // 双重保险：无论如何把画面亮度拉回 1.0
-            MagnifierDim.Restore();
-
-            Application.Exit();
-        }
-
-        private void PersistConfig()
-        {
-            try
-            {
-                new ConfigManager().SaveConfig(_config);
-            }
-            catch
-            {
-                // 忽略写入失败
-            }
         }
 
         private void 自动调整亮度ToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            setLightLevel(-1);
+            _config.IsAutoChange = !_config.IsAutoChange;
+
+            if (_config.IsAutoChange)
+            {
+                applyAutoBrightness(smooth: true);
+            }
+
+            RefreshTrayUi();
+            PersistConfig();
+        }
+        private void 平滑过渡ToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            _config.SmoothTransition = !_config.SmoothTransition;
+            RefreshTrayUi();
+            PersistConfig();
         }
 
-        /// <summary>在“整屏压暗”和“黑膜叠加”两种模式间切换。</summary>
+        private void 设置ToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            ShowSettings();
+        }
+
+        private void 开机自动启动ToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            _config.IsAutoRun = !_config.IsAutoRun;
+            _wc.AutoRun(_config.AppSubkey, _config.AppName, _config.IsAutoRun);
+            开机自动启动ToolStripMenuItem.Checked = _config.IsAutoRun;
+            PersistConfig();
+        }
+
         private void 使用整屏压暗ToolStripMenuItem_Click(object sender, EventArgs e)
         {
             if (_overlay == null)
@@ -230,44 +364,159 @@ namespace BlackPaper
             _overlay.SetMode(wantDim ? OverlayMode.Dim : OverlayMode.Curtain);
             _config.Mode = wantDim ? 0 : 1;
             使用整屏压暗ToolStripMenuItem.Checked = wantDim;
-            RefreshStateText();
+            RefreshTrayUi();
             PersistConfig();
+        }
+
+        private void 退出ToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            PersistConfig();
+
+            if (_settings != null && !_settings.IsDisposed)
+            {
+                _settings.Close();
+            }
+
+            // 先收拾托盘图标，否则 Win11 上会留下"幽灵图标"
+            notifyIcon2.Visible = false;
+            notifyIcon2.Dispose();
+
+            // 退出也渐变：从当前亮度淡回全亮，避免画面突然“一亮”。
+            // 必须同步等它跑完，因为紧接着就要 Exit。
+            if (_overlay != null && _config.SmoothTransition && _overlay.Opacity > 0.005)
+            {
+                FadeOutAndWait(Math.Max(300, Math.Min(_config.TransitionMs, 1200)));
+            }
+
+            _overlay?.Dispose();
+            _overlay = null;
+
+            // 双重保险：无论如何把画面亮度拉回 1.0
+            MagnifierDim.Restore();
+
+            Application.Exit();
+        }
+
+        /// <summary>
+        /// 退出前把遮罩淡到 0（画面回全亮），并同步等待完成。
+        /// 用轮询而不是阻塞在渐变线程上，保证 UI 不会假死。
+        /// </summary>
+        private void FadeOutAndWait(int durationMs)
+        {
+            try
+            {
+                _overlay.SetOpacitySmooth(0.0, durationMs);
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                int limit = durationMs + 400;
+
+                while (sw.ElapsedMilliseconds < limit)
+                {
+                    if (_overlay.Opacity <= 0.005)
+                    {
+                        break;
+                    }
+
+                    System.Threading.Thread.Sleep(15);
+
+                    // 保持消息泵存活，避免托盘菜单卡住
+                    Application.DoEvents();
+                }
+
+                _overlay.SetOpacity(0.0);
+            }
+            catch
+            {
+                // 退出路径上的任何异常都不应阻止程序结束
+                MagnifierDim.Restore();
+            }
+        }
+
+        #endregion
+
+        #region 设置窗口
+
+        private void ShowSettings()
+        {
+            if (_settings != null && !_settings.IsDisposed)
+            {
+                if (_settings.WindowState == FormWindowState.Minimized)
+                {
+                    _settings.WindowState = FormWindowState.Normal;
+                }
+
+                _settings.Activate();
+                return;
+            }
+
+            _settings = new SettingsForm(_config);
+
+            _settings.BrightnessChanged += level =>
+            {
+                setBrightnessManual(level);
+            };
+
+            _settings.ScheduleChanged += () =>
+            {
+                // 时段改动后若正处于自动模式，立即按新配置重算
+                if (_config.IsAutoChange)
+                {
+                    _lastAutoTarget = -1;
+                    applyAutoBrightness(smooth: true);
+                }
+
+                PersistConfig();
+            };
+
+            _settings.FormClosed += (s, e) =>
+            {
+                PersistConfig();
+                _settings = null;
+            };
+
+            _settings.Show();
+            _settings.Activate();
+        }
+
+        #endregion
+
+        #region 托盘图标交互
+
+        private void notifyIcon2_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                ShowSettings();
+            }
+        }
+
+        #endregion
+
+        private void PersistConfig()
+        {
+            try
+            {
+                new ConfigManager().SaveConfig(_config);
+            }
+            catch
+            {
+                // 忽略写入失败
+            }
         }
 
         private void timer1_Tick(object sender, EventArgs e)
         {
             if (_config != null && _config.IsAutoChange)
             {
-                setLightLevel(-1);
+                applyAutoBrightness(smooth: true);
             }
 
-            // 定时兜底：确保遮罩仍在最顶层
+            // 定时兜底：确保黑膜模式下遮罩仍在最顶层
             _overlay?.ReassertTopMost();
         }
 
-        private void 关闭菜单ToolStripMenuItem_Click_1(object sender, EventArgs e)
-        {
-            contextMenuStrip1.Hide();
-        }
-
-        private void toolStripComboBox1_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            if (_overlay == null || _suppressComboEvent)
-            {
-                return;
-            }
-
-            double op = (double)toolStripComboBox1.SelectedIndex / 5.0;
-            setLightLevel(op);
-        }
-
-        private void notifyIcon2_MouseDoubleClick(object sender, MouseEventArgs e)
-        {
-            // 双击暂不响应，保留给以后扩展
-        }
-
         /// <summary>
-        /// 接收显示设置变更 / 会话解锁 / 电源恢复等广播，重建或重压遮罩。
+        /// 接收显示设置变更 / 会话解锁 / 电源恢复等广播，重建或重施遮罩。
         /// </summary>
         protected override void WndProc(ref Message m)
         {
@@ -292,7 +541,6 @@ namespace BlackPaper
                 case NativeMethods.WM_WTSSESSION_CHANGE:
                     if ((int)m.WParam == NativeMethods.WTS_SESSION_UNLOCK)
                     {
-                        // 解锁后 DWM 会重新合成，必须重建遮罩
                         _overlay?.OnDisplayChanged();
                     }
                     break;
