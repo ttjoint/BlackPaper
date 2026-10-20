@@ -1,121 +1,99 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace BlackPaper
 {
+    /// <summary>
+    /// 开机自启动等系统集成功能。
+    /// （原先的窗口穿透逻辑已迁移到 OverlayForm，那里用 64 位安全的 SetWindowLongPtr。）
+    /// </summary>
     internal class WindowController
     {
-        private Control ctl;    // 窗体控制器
-        private const uint WS_EX_LAYERED = 0x80000;
-        private const int WS_EX_TRANSPARENT = 0x20;
-        private const int GWL_STYLE = (-16);
-        private const int GWL_EXSTYLE = (-20);
-        private const int LWA_ALPHA = 0x2;
+        private readonly Control _ctl;
 
-   
-
-        [DllImport("user32", EntryPoint = "SetWindowLong")]
-        private static extern uint SetWindowLong(
-        IntPtr hwnd,
-        int nIndex,
-        uint dwNewLong
-        );
-
-        [DllImport("user32", EntryPoint = "GetWindowLong")]
-        private static extern uint GetWindowLong(
-        IntPtr hwnd,
-        int nIndex
-        );
-
-        [DllImport("user32", EntryPoint = "SetLayeredWindowAttributes")]
-        private static extern int SetLayeredWindowAttributes(
-        IntPtr hwnd,
-        int crKey,
-        int bAlpha,
-        int dwFlags
-        );
-
-        public WindowController(Control _ctl) => ctl = _ctl;
-
-
-
-        ///<summary>
-        /// 设置窗体具有鼠标穿透效果
-        ///</summary>
-        public void SetPenetrate()
-        {
-            
-            GetWindowLong(ctl.Handle, GWL_EXSTYLE);
-            SetWindowLong(ctl.Handle, GWL_EXSTYLE, WS_EX_TRANSPARENT | WS_EX_LAYERED);
-            SetLayeredWindowAttributes(ctl.Handle, 0, 100, LWA_ALPHA);
-        }
-
-
+        public WindowController(Control ctl) => _ctl = ctl;
 
         #region 开机自动运行相关
 
         /// <summary>
-        /// 检查是否开机自动启动，设置按钮状态等
+        /// 检查注册表里是否已经设置了开机自启动。
         /// </summary>
         public bool checkIfAutoRun(string subkey, string name)
         {
+            if (string.IsNullOrWhiteSpace(subkey) || string.IsNullOrWhiteSpace(name))
+            {
+                return false;
+            }
+
             try
             {
-                RegistryKey loca_chek = Registry.CurrentUser;
-                RegistryKey run_Check = loca_chek.CreateSubKey(subkey);
-                if (run_Check.GetValue(name) != null && run_Check.GetValue(name).ToString().ToLower() != "false")
+                using (RegistryKey baseKey = Registry.CurrentUser)
+                using (RegistryKey runKey = baseKey.OpenSubKey(subkey))
                 {
+                    object value = runKey?.GetValue(name);
+                    if (value == null)
+                    {
+                        return false;
+                    }
+
+                    string text = value.ToString();
+                    if (string.IsNullOrWhiteSpace(text) || text.Equals("false", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+
                     return true;
                 }
-                else
-                {
-                    return false;
-                }
             }
-            catch(Exception e)
+            catch
             {
                 return false;
             }
         }
 
         /// <summary>
-        /// 做开机自动启动设置，根据isAutoRun值设为或者取消开机自动启动
+        /// 设置或取消开机自启动。
         /// </summary>
         public void AutoRun(string subkey, string name, bool isAutoRun)
         {
-            //获取程序执行路径
-            string starupPath = Application.ExecutablePath;
-            //class Micosoft.Win32.RegistryKey. 表示Window注册表中项级节点,此类是注册表装.
-            RegistryKey loca = Registry.CurrentUser;
-            RegistryKey run = loca.CreateSubKey(subkey);
+            if (string.IsNullOrWhiteSpace(subkey) || string.IsNullOrWhiteSpace(name))
+            {
+                return;
+            }
+
             try
             {
-                //SetValue:存储值的名称
-                if (isAutoRun == true)
-                {
-                    //设置开机运行
-                    run.SetValue(name, starupPath);
+                string startupPath = Application.ExecutablePath;
 
-                }
-                else
+                using (RegistryKey baseKey = Registry.CurrentUser)
+                using (RegistryKey runKey = baseKey.CreateSubKey(subkey))
                 {
-                    // cancel auto-start
-                    run.DeleteValue(name);
+                    if (runKey == null)
+                    {
+                        return;
+                    }
 
+                    if (isAutoRun)
+                    {
+                        // 路径含空格时加引号，否则 Windows 会错误拆分命令行
+                        string quoted = startupPath.Contains(" ")
+                            ? "\"" + startupPath + "\""
+                            : startupPath;
+                        runKey.SetValue(name, quoted, RegistryValueKind.String);
+                    }
+                    else
+                    {
+                        runKey.DeleteValue(name, throwOnMissingValue: false);
+                    }
                 }
-                loca.Close();
             }
-            catch (Exception ex)
+            catch
             {
+                // 注册表写入失败（组策略限制等）时静默忽略
             }
         }
-        #endregion
 
+        #endregion
     }
 }

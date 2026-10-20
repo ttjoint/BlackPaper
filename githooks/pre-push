@@ -1,0 +1,44 @@
+#!/bin/sh
+#
+# BlackPaper —— 推送守卫
+#
+# 背景：旧库 momordica2020/BlackPaper 已 archive，本仓库已迁移到 ttjoint/BlackPaper。
+# 此钩子防止把提交误推到已归档的旧库。
+#
+# 注意：Git for Windows 在部分环境下会跳过 hooks（例如缺少 sh.exe 或沙箱限制）。
+# 因此这只是三道防线之一，另外两道是：
+#   1) git config 里已删除 origin，并写入 blackpaper.archived.* 记录
+#   2) README 与仓库描述中明确标注旧库已归档
+#
+# 需要放行时：git push --no-verify
+
+BLOCKED="momordica2020/blackpaper"
+status=0
+
+for remote in $(git remote); do
+    url=$(git remote get-url --push "$remote" 2>/dev/null)
+    [ -z "$url" ] && continue
+
+    normalized=$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')
+
+    case "$normalized" in
+        *"$BLOCKED"*)
+            echo "" >&2
+            echo "==============================================================" >&2
+            echo "  推送已被拒绝" >&2
+            echo "==============================================================" >&2
+            echo "  remote '$remote' 指向已归档的旧库：" >&2
+            echo "    $url" >&2
+            echo "" >&2
+            echo "  新库地址： https://github.com/ttjoint/BlackPaper" >&2
+            echo "" >&2
+            echo "  如需切换到新库：" >&2
+            echo "    git remote remove $remote" >&2
+            echo "    git remote add origin https://github.com/ttjoint/BlackPaper.git" >&2
+            echo "==============================================================" >&2
+            status=1
+            ;;
+    esac
+done
+
+exit $status

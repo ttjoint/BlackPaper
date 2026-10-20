@@ -1,4 +1,34 @@
-/*.suo
-/BlackPaper/bin/Debug
-/BlackPaper/obj/Debug
-/.vs
+# ---- Visual Studio ----
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.csproj.user
+
+# ---- 构建输出 ----
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# ---- NuGet ----
+packages/
+*.nupkg
+*.nupkg.metadata
+*.snupkg
+project.assets.json
+project.nuget.cache
+
+# ---- 运行时数据（不参与构建，含用户配置）----
+appconfig.json
+appconfig.json.broken_*
+_*.txt
+
+# ---- 其他 ----
+*.pdb
+*.cache
+*.tlog
+Thumbs.db
+desktop.ini
+.DS_Store

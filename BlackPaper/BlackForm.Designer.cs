@@ -34,6 +34,7 @@
             this.toolStripComboBox1 = new System.Windows.Forms.ToolStripComboBox();
             this.ToolStripMenuItem_state = new System.Windows.Forms.ToolStripMenuItem();
             this.自动调整亮度ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.使用整屏压暗ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.开机自动启动ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.退出ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.timer1 = new System.Windows.Forms.Timer(this.components);
@@ -50,6 +51,7 @@
             this.toolStripComboBox1,
             this.ToolStripMenuItem_state,
             this.自动调整亮度ToolStripMenuItem,
+            this.使用整屏压暗ToolStripMenuItem,
             this.开机自动启动ToolStripMenuItem,
             this.退出ToolStripMenuItem});
             this.contextMenuStrip1.Name = "contextMenuStrip1";
@@ -85,6 +87,15 @@
             this.自动调整亮度ToolStripMenuItem.Size = new System.Drawing.Size(194, 32);
             this.自动调整亮度ToolStripMenuItem.Text = "自动亮度 @";
             this.自动调整亮度ToolStripMenuItem.Click += new System.EventHandler(this.自动调整亮度ToolStripMenuItem_Click);
+            // 
+            // 使用整屏压暗ToolStripMenuItem
+            // 
+            this.使用整屏压暗ToolStripMenuItem.Font = new System.Drawing.Font("Microsoft YaHei UI", 9F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(134)));
+            this.使用整屏压暗ToolStripMenuItem.ForeColor = System.Drawing.Color.DarkGreen;
+            this.使用整屏压暗ToolStripMenuItem.Name = "使用整屏压暗ToolStripMenuItem";
+            this.使用整屏压暗ToolStripMenuItem.Size = new System.Drawing.Size(194, 32);
+            this.使用整屏压暗ToolStripMenuItem.Text = "整屏压暗模式";
+            this.使用整屏压暗ToolStripMenuItem.Click += new System.EventHandler(this.使用整屏压暗ToolStripMenuItem_Click);
             // 
             // 开机自动启动ToolStripMenuItem
             // 
@@ -128,12 +139,11 @@
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.Name = "BlackForm";
-            this.Opacity = 0.5D;
+            this.Opacity = 0.01D;
             this.ShowIcon = false;
             this.ShowInTaskbar = false;
             this.Text = "BlackPaper";
-            this.TopMost = true;
-            this.WindowState = System.Windows.Forms.FormWindowState.Maximized;
+            this.WindowState = System.Windows.Forms.FormWindowState.Normal;
             this.Load += new System.EventHandler(this.Form1_Load);
             this.contextMenuStrip1.ResumeLayout(false);
             this.ResumeLayout(false);
@@ -146,6 +156,7 @@
         private System.Windows.Forms.ToolStripMenuItem 开机自动启动ToolStripMenuItem;
         private System.Windows.Forms.Timer timer1;
         private System.Windows.Forms.ToolStripMenuItem 自动调整亮度ToolStripMenuItem;
+        private System.Windows.Forms.ToolStripMenuItem 使用整屏压暗ToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem ToolStripMenuItem_state;
         private System.Windows.Forms.ToolStripComboBox toolStripComboBox1;
         private System.Windows.Forms.NotifyIcon notifyIcon2;
